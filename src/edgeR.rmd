@@ -1,0 +1,24 @@
+---
+title: "edgeR - MSI Sensor"
+author: "Nick Wlodychak"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(edgeR)
+
+counts <- read.delim("counts.txt",
+                     skip = 1)
+row.names(counts) <- counts$Geneid
+counts <- counts[, 6:ncol(counts)]
+gene_lengths <- counts$Length
+lib_sizes <- colSums(counts)
+fpkm <- rpkm(counts,
+             gene.length = gene_lengths,
+             lib.size = lib_sizes)
+write.table(fpkm,
+            "fpkm_values.txt",
+            sep = "\t",
+            quote = FALSE)
+```
