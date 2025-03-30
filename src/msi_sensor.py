@@ -4,6 +4,9 @@ import pandas as pd
 import os
 from pathlib import Path
 import scanpy as sc
+from sklearn.impute import KNNImputer
+from sklearn.impute import SimpleImputer
+import numpy as np
 
 
 def load_data_scanpy(expression_data) -> sc.AnnData:
@@ -15,50 +18,106 @@ def load_data_scanpy(expression_data) -> sc.AnnData:
     print("Loading expression data...")
     rna_adata = sc.read_10x_mtx(expression_data)
 
+
+
     # patient id extraction
     rna_adata.obs['patient'] = rna_adata.obs_names.str.split('_').str[0]
     print("Unique patients:", rna_adata.obs['patient'].unique())
 
     # masking by patients
-    patient = ["CID3586", "CID3838", "CDI3921", "CID3941", "CID3946", "CID3948", "CID3963"]
+    # patient = ["CID3586", "CID3838", "CDI3921", "CID3941", "CID3946", "CID3948", "CID3963"]
+    patient = ["CID3586"]
     patient_mask = rna_adata.obs['patient'].isin(patient)
     patient_filtered = rna_adata[patient_mask].copy()
 
     # basic qc to filter out genes / cells
     sc.pp.filter_cells(patient_filtered, min_counts = 200)  # Filter out empty droplets
-    # sc.pp.filter_genes(patient_filtered, min_cells = 10)  # Filter rarely expressed genes
+    # sc.pp.filter_genes(patient_filtered, min_cells = 1)  # Filter rarely expressed genes
+    # sc.pp.normalize_total(patient_filtered, target_sum = 1e4)
+    # sc.pp.log1p(patient_filtered)
+
     print("Expression data filtered!")
     return patient_filtered
 
 
-def prepare_msisensor_input(adata, outfile = "msisensor_input.csv") -> Path:
+def prepare_msisensor_input(adata, required_genes, outfile = "msisensor_input.csv", impute_method = 1) -> Path:
     """
     This function parses the 10x adata table and generates a msisensor input
     :param adata: the adata table to be passed to MSI-sensor
     :param outfile: The output csv file ready for MSI-sensor
-    :return:
+    :param impute_method: Method to impute missing data (0: mean replacement, 1: fill with 0, 2: KNN)
+    :return: output_path: where the msisensor input file is
     """
-    print("Converting expression data into MSI...")
-    expr_matrix = adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X
-    gene_names = adata.var_names
+    # convert to dataframe
+    df = adata.to_df().astype(np.float64)  # Float32 matches TCGA model
 
-    # parse adata based on the cell barcodes
-    df = pd.DataFrame(expr_matrix,
-                      index = adata.obs_names,
-                      columns = gene_names)
-
+    # santitaztion
+    df = df.replace([np.inf, -np.inf], np.nan).fillna(1e-8)
+    df = df.replace(0, 1e-8)
+    df = df.filter(items=required_genes)
+    # formatting
     df.index.name = 'SampleID'
-    df = df.reset_index()
-
-    # Create output path
     output_path = Path(outpath, outfile)
-    df.to_csv(output_path, index = False)
+    df.reset_index().to_csv(output_path, index = False, float_format = '%.16f')
+
+    #
+    # print("Converting expression data into MSI...")
+    # expr_matrix = adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X
+    # expr_matrix = expr_matrix.astype(np.float64)
+    #
+    # print(f"Matrix dtype: {expr_matrix.X.dtype}")
+    # print(f"Sparsity: {100 * (expr_matrix.X.nnz / np.prod(expr_matrix.X.shape)):.2f}%")
+    #
+    # # Sanitize matrix before DataFrame creation
+    # expr_matrix = np.nan_to_num(expr_matrix, nan = 0, posinf = 0, neginf = 0)
+    # print("NaNs in expr_matrix:", np.isnan(expr_matrix).sum())
+    # gene_names = adata.var_names
+    #
+    # # parse adata based on the cell barcodes
+    # df = pd.DataFrame(expr_matrix,
+    #                   index = adata.obs_names,
+    #                   columns = gene_names).astype(np.float64)
+    # nan_count = df.isna().sum().sum()
+    # print("NaNs in expr_matrix:", nan_count)
+    # try:
+    #     if nan_count > 0:
+    #         print(f"Found {nan_count} NaN values. Imputing...")
+    #         if impute_method == 0:
+    #             # fill nan with column means (gene-wise)
+    #             df = df.fillna(df.mean())
+    #
+    #         elif impute_method == 1:
+    #             # fill na with 0
+    #             df = df.fillna(0)
+    #
+    #         elif impute_method == 2:
+    #             # impute with knn (intensive computationally)
+    #             imputer = KNNImputer(n_neighbors = 5)
+    #             expr_matrix_imputed = imputer.fit_transform(expr_matrix)
+    #             df = pd.DataFrame(expr_matrix_imputed, index = adata.obs_names, columns = gene_names)
+    #
+    #         elif impute_method == 3:
+    #             imputer = SimpleImputer(missing_values=np.nan, strategy='mean')
+    #             expr_matrix_imputed = imputer.fit_transform(expr_matrix)
+    #             df = pd.DataFrame(expr_matrix_imputed, index = adata.obs_names, columns = gene_names)
+    #         else:
+    #             raise ValueError(f"Imputation method Unknown!")
+    #
+    # except KeyError:
+    #     print(f"Imputation method Error!")
+    #
+    # df.index.name = 'SampleID'
+    # df = df.reset_index()
+    #
+    # # Create output path
+    # output_path = Path(outpath, outfile)
+    # df.to_csv(output_path, index = False, na_rep = '0')
     print(f"Saved MSIsensor-RNA input to {output_path}")
 
     return output_path
 
 
-def run_msi_sensor(input, outfile = "msisensor_output"):
+def run_msi_sensor(input, model, outfile = "msisensor_output.csv"):
     """
     Runs the msi sensor pipeline on the input file
     :param input: a csv formatted file
@@ -69,21 +128,43 @@ def run_msi_sensor(input, outfile = "msisensor_output"):
     try:
         output_path = Path(outpath, outfile)
         print("Running MSI-sensor pipeline")
-        output = Path(output_path, "msi_predictions.csv")
-        call = f"msisensor-rna detection -i {input} -m msisensor-rna/model/TCGA.MSIPopular.model.pkl -o {output}"
+        # output = Path(output_path, "msi_predictions.csv")
+        call = f"msisensor-rna detection -i {input} -o {output_path} -m {model} -d TRUE"
         subprocess.call(call, shell = True)
     except Exception as e:
         print("An error occurred while processing msi sensor!")
         exit(1)
-    print(f"msi sensor pipeline complete!\n Data at: {output}")
+    print(f"msi sensor pipeline complete!\n Data at: {output_path}")
+
+
+def verify_model_compatibility(model_path, adata):
+    """
+    Check model compatibility with adata frame
+    :param model_path: path to the pickle mode
+    :param adata: adata read into memory
+    :return:
+    """
+    import pickle
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    required_genes = model.feature_names_in_
+    missing = set(required_genes) - set(adata.var_names)
+    if missing:
+        raise ValueError(f"Missing {len(missing)} model-required genes")
+    else:
+        print(f"Model compatible with {len(required_genes)} Genes")
+    return required_genes
 
 if __name__ == "__main__":
     os.chdir(Path(__file__).resolve().parent.parent)
-    outpath = "msisensor_pipeline"
-    os.makedirs(outpath, exist_ok = True)
     rna_data_path = "data/SCP1039/expression"
+    outpath = "msisensor_pipeline"
+    model = "msisensor-rna/model/TCGA.MSIPopular.model.pkl"
+
+    os.makedirs(outpath, exist_ok = True)
 
     adata = load_data_scanpy(rna_data_path)
-    msi_input = prepare_msisensor_input(adata)
-    # msi_input = Path(outpath, "msisensor_input.csv")
-    run_msi_sensor(msi_input)
+    required_genes = verify_model_compatibility(model, adata)
+    msi_input = prepare_msisensor_input(adata, required_genes)
+
+    run_msi_sensor(msi_input, model)
