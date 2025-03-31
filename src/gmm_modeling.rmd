@@ -1,0 +1,92 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+library("anndata")
+library(ggplot2)
+library(dplyr)
+
+df <- read.csv("data/rna_filtered.csv")
+df <- df %>% filter(patient == "CID3963")
+model <- lm(MSI_score ~ Stromal_score + Immune_score, data = df)
+summary(model)
+p <- ggplot(data = df, aes(x = MSI_score, y = Immune_score)) + geom_density_2d(aes(colour = patient)) + theme_bw()
+p
+```
+```{r}
+library(c("anndata",
+          "mclust",
+          "SingleCellExperiment",
+          "scran",
+          "zellkonverter",
+          "scuttle",
+          "ComplexHeatmap"))
+
+
+# filtered RNA AnnData matrix from scanpy
+ad <- read_h5ad("data/rna_filtered.h5ad")
+sce <- AnnData2SCE(ad, layers="X")
+
+sc_matrix <- as.matrix(
+   colData(sce)[, c("MSI_score", "Immune_score")]
+) # our features that we assigned from gene ids in scanpy
+
+sc_matrix <- sc_matrix[, apply(sc_matrix, 2, var) > 0] # avoid 0s
+sc_matrix <- scale(sc_matrix)
+
+# mclust model
+set.seed(101)
+mclust_model <- Mclust(
+    sc_matrix,
+    G = 1:4,
+    modelNames = "VVE",
+    control = emControl(eps = 1e-04, itmax = 50)
+)
+
+assay(sce, "logcounts") <- assay(sce, "X")
+
+# drop cells with uncertainity
+sce <- sce[, mclust_model$uncertainty < 0.3]
+sce$mclust_cluster <- mclust_model$classification
+markers <- findMarkers(
+    sce,
+    groups = sce$mclust_cluster,
+    assay.type = "X",
+    test = "wilcox"
+)
+
+
+plot(sc_matrix, col = ad$obs$patient, pch = 1)
+plot(sc_matrix, col = mclust_model$classification, pch = 1)
+
+
+top_markers <- lapply(names(markers), function(cluster) {
+  cluster_df <- markers[[cluster]]
+  head(rownames(cluster_df)[order(cluster_df$FDR)], 5)
+})
+
+names(top_markers) <- names(markers)
+
+unique_markers <- unique(unlist(top_markers))
+marker_expr <- assay(sce, "logcounts")[unique_markers, ]
+
+cell_order <- order(sce$mclust_cluster)
+marker_expr <- marker_expr[, cell_order]
+marker_expr <- as.matrix(assay(sce, "logcounts")[unique_markers, ])
+
+dot_data <- data.frame(
+  Gene = rep(unique_markers, times = length(unique(sce$mclust_cluster))),
+  Cluster = rep(unique(sce$mclust_cluster), each = length(unique_markers)),
+  Expression = runif(length(unique_markers) * length(unique(sce$mclust_cluster))),
+  PercentExpressing = runif(length(unique_markers) * length(unique(sce$mclust_cluster)), min = 0, max = 100)
+)
+
+p <- ggplot(dot_data, aes(x = Cluster, y = Gene)) +
+       geom_point(aes(size = PercentExpressing, color = Expression)) +
+        scale_color_gradient(low = "blue", high = "red") +
+        theme_light()
+
+ggsave("output/gmm_dotplot.png", h = 10, w = 7)
+
+```
