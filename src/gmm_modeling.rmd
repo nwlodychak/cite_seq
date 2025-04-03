@@ -3,16 +3,52 @@ title: "R Notebook"
 output: html_notebook
 ---
 ```{r}
-library("anndata")
-library(ggplot2)
-library(dplyr)
+library('anndata')
+library('ggplot2')
+library('dplyr')
 
-df <- read.csv("data/rna_filtered.csv")
-df <- df %>% filter(patient == "CID3963")
-model <- lm(MSI_score ~ Stromal_score + Immune_score, data = df)
-summary(model)
-p <- ggplot(data = df, aes(x = MSI_score, y = Immune_score)) + geom_density_2d(aes(colour = patient)) + theme_bw()
-p
+df <- read.csv("output/sc_rna_scores.csv")
+colnames(df)
+
+df$msi_status <- factor(df$msi_status, levels = c('MSS', 'MSI-H'))
+
+model <- glm(msi_status ~ msi_score + immune_score + stromal_score,
+             data = df,
+             family = binomial)
+
+cor(df$msi_score, df$probability_of_MSI.H)
+
+seq_data <- data.frame(
+  msi_score = seq(min(df$msi_score), max(df$msi_score), length.out = 1000),
+  immune_score = mean(df$immune_score),
+  stromal_score = mean(df$stromal_score)
+)
+
+
+preds <- predict(model, newdata = seq_data, type = "link", se.fit = TRUE)
+
+critical_value <- 1.95
+seq_data$fit <- preds$fit
+seq_data$lower <- preds$fit - critical_value * preds$se.fit
+seq_data$upper <- preds$fit + critical_value * preds$se.fit
+
+seq_data$pred_prob <- plogis(seq_data$fit)
+seq_data$lower_prob <- plogis(seq_data$lower)
+seq_data$upper_prob <- plogis(seq_data$upper)
+
+p <- ggplot(data = df, aes(x = msi_score, y = probability_of_MSI.H)) +
+        geom_point(aes(colour = immune_score)) +
+        geom_line(data = seq_data,
+                  aes(x = msi_score, y = pred_prob),
+                      color = "blue", size = 2) +
+        geom_ribbon(data = seq_data,
+                  aes(x = msi_score, y = pred_prob, ymin = lower_prob, ymax = upper_prob),
+                      fill = "grey", alpha = 0.7) +
+        labs(title = "GLM - msi_status ~ immune_score + stromal_score + msi_score",
+       y = "probability of MSI-H - SVM", x = "msi_score - scanpy gene panel")
+  theme_bw()
+
+ggsave("output/glm.plot.png", p, h = 7, w = 7)
 ```
 ```{r}
 library(c("anndata",

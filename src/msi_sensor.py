@@ -47,7 +47,7 @@ def load_data_scanpy(expression_data: Path) -> sc.AnnData:
     print("Unique patients:", rna_adata.obs['patient'].unique())
 
     # masking by patients
-    patient = ["CID3586", "CID3838", "CDI3921", "CID3941", "CID3946", "CID3948", "CID3963"]
+    patient = ["CID3586", "CID3838", "CDI3921", "CID3941", "CID3946", "CID3948", "CID3963", "CID4398", "CID44971"]
     # patient = ["CID3586"]
     patient_mask = rna_adata.obs['patient'].isin(patient)
     patient_filtered = rna_adata[patient_mask].copy()
