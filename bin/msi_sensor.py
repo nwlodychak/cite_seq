@@ -25,6 +25,7 @@ import pandas as pd
 import os
 from pathlib import Path
 import scanpy as sc
+import scipy
 from sklearn.impute import KNNImputer
 from sklearn.impute import SimpleImputer
 import numpy as np
@@ -32,16 +33,12 @@ import pickle
 import argparse
 
 def get_args():
-    parser = argparse.ArgumentParser(description="""
+    """
+    Parse command line arguments
+    :return: args
+    """
+    parser = argparse.ArgumentParser()
 
-    DESCRIPTION
-
-        """, formatter_class= argparse.RawTextHelpFormatter)
-    parser.add_argument('--sample_id',
-                    type=str,
-                    default=None,
-                    help='Sample ID to parse from the data frame. must be in a sample ID column unless defined with --sample_col param',
-                    required=True)
     parser.add_argument('--data',
                     type=str,
                     default='.',
@@ -52,30 +49,40 @@ def get_args():
                     default='sample_id',
                     help='Optional column name in the 10X matrix for sample ID.',
                     required=True)
+    parser.add_argument('--sample_id',
+                    type=str,
+                    default=None,
+                    help='Sample ID to parse from the data frame. must be in a sample ID column unless defined with --sample_col param',
+                    required=True)
     parser.add_argument('--sample_col',
                     type=str,
                     default='sample_id',
                     help='Optional column name in the 10X matrix for sample ID.',
-                    required=True)   
+                    required=False)   
     parser.add_argument('--min_counts',
                     type=int,
                     default=200,
                     help='Minimum counts to filter cells.',
-                    required=True)
+                    required=False)
     parser.add_argument('--min_cells',
                     type=int,
                     default=1,
                     help='Minimum genes expressed to filter cells.',
-                    required=True)
+                    required=False)
     parser.add_argument('--target_sum',
                     type=int,
                     default=1e4,
                     help='',
-                    required=True)
+                    required=False)
     parser.add_argument('--impute_method',
                     type=int,
                     default=0,
-                    help='How should missing values be filled in?',
+                    help='How should missing values be filled in? (0: fill with 0, 1: fill with NA, 2: KNN, 3: simple imputation)',
+                    required=False)
+    parser.add_argument('--model',
+                    type=int,
+                    default=".",
+                    help='msi_model to use in training.',
                     required=True)
     args = parser.parse_args()
     return args
@@ -113,17 +120,16 @@ def load_data_scanpy(expression_data: Path) -> sc.AnnData:
     return sample_filtered
 
 
-def prepare_msisensor_input(rna_data: sc.AnnData, required_genes: set, outpath: Path) -> Path:
+def prepare_msisensor_input(rna_data: sc.AnnData, required_genes: set) -> Path:
     """
     This function parses the 10x adata table and generates a msisensor input
     :param rna_data: the adata table to be passed to MSI-sensor
     :param required_genes: genes needed for the msi-sensor model
-    :param outpath: The output file location - ready for MSI-sensor
-    :param impute_method: Method to impute missing data (0: mean replacement, 1: fill with 0, 2: KNN)
+    :param impute_method: Method to impute missing data 
     :return: output_path: where the msisensor input file is
     """
-    outfile = "msisensor_input.csv"
-    output_path = Path(outpath, outfile)
+    infile = "msisensor_input.csv"
+    outpath = Path(args.outdir, infile)
 
     # convert to dataframe
     df = rna_data.to_df().astype(np.float64)
@@ -135,7 +141,7 @@ def prepare_msisensor_input(rna_data: sc.AnnData, required_genes: set, outpath: 
 
     # formatting
     df.index.name = 'SampleID'
-    df.reset_index().to_csv(output_path, index = False, float_format = '%.16f')
+    df.reset_index().to_csv(outpath, index = False, float_format = '%.16f')
 
     
     print("Converting expression data into MSI...")
@@ -145,7 +151,7 @@ def prepare_msisensor_input(rna_data: sc.AnnData, required_genes: set, outpath: 
     print(f"Matrix dtype: {expr_matrix.X.dtype}")
     print(f"Sparsity: {100 * (expr_matrix.X.nnz / np.prod(expr_matrix.X.shape)):.2f}%")
     
-    # Sanitize matrix before DataFrame creation
+    # sanitize matrix before DataFrame creation
     expr_matrix = np.nan_to_num(expr_matrix, nan = 0, posinf = 0, neginf = 0)
     print("NaNs in expr_matrix:", np.isnan(expr_matrix).sum())
     gene_names = adata.var_names
@@ -186,37 +192,39 @@ def prepare_msisensor_input(rna_data: sc.AnnData, required_genes: set, outpath: 
     
     except KeyError:
         print(f"Imputation method Error!")
-    
+
     df.index.name = 'SampleID'
     df = df.reset_index()
     
-    # Create output path
-    output_path = Path(outpath, outfile)
-    df.to_csv(output_path, index = False, na_rep = '0')
-    print(f"Saved MSIsensor-RNA input to {output_path}")
+    # msi_sensor input path
+    df.to_csv(outpath, index = False, na_rep = '0')
+    print(f"Saved MSIsensor-RNA input to {args.outdir}")
 
-    return output_path
+    return outpath
 
 
-def verify_model_compatibility(model: Path, rna_data: sc.AnnData) -> set:
+def verify_model_compatibility(rna_data: sc.AnnData) -> set:
     """
     Check model compatibility with adata frame
-    :param model: path to the pickle mode
     :param rna_data: adata read into memory
     :return: required_genes: list of genes needed for SVM
     """
 
-    with open(model, 'rb') as f:
-        out_model = pickle.load(f)
-    required_genes = out_model.feature_names_in_
-    missing = set(required_genes) - set(adata.var_names) # set genes from both frames
-    if missing:
-        raise ValueError(f"Missing {len(missing)} model-required genes")
+    if os.path.exists(args.model):
+        with open(args.model, 'rb') as f:
+            out_model = pickle.load(f)
+        required_genes = out_model.feature_names_in_
+        missing = set(required_genes) - set(adata.var_names) # set genes from both frames
+        if missing:
+            raise ValueError(f"Missing {len(missing)} model-required genes")
+        else:
+            print(f"Model compatible with {len(required_genes)} Genes")
+        return required_genes
     else:
-        print(f"Model compatible with {len(required_genes)} Genes")
-    return required_genes
+        print("Check model path!")
+        exit(1)
 
-def run_msi_sensor(input: Path, outpath: Path, model: Path):
+def run_msi_sensor(input: Path):
     """
     Runs the msi sensor pipeline on the input file
     :param input: a csv formatted file
@@ -227,33 +235,24 @@ def run_msi_sensor(input: Path, outpath: Path, model: Path):
     outfile = "msisensor_output.csv"
     print("Initializing msi sensor pipeline...")
     try:
-        output_path = Path(outpath, outfile)
+        output_path = Path(args.outdir, outfile)
         print("Running MSI-sensor pipeline")
-        call = f"msisensor-rna detection -i {input} -o {output_path} -m {model} -d TRUE"
+        call = f"msisensor-rna detection -i {input} -o {output_path} -m {args.model} -d TRUE"
         subprocess.call(call, shell = True)
     except Exception as e:
         print(f"An error occurred while processing msi sensor! {e}")
         exit(1)
     print(f"msi sensor pipeline complete!\n Data at: {output_path}")
 
-if __name__ == "__main__":
-    params_dict = {
-        "rna_data_path": Path("data/SCP1039/expression"),
-        "outpath"      : Path("msisensor_pipeline"),
-        "model"        : Path("msisensor-rna/model/TCGA.MSIPopular.model.pkl")
-    }
 
+if __name__ == "__main__":
     # housekeeping
     os.chdir(Path(__file__).resolve().parent.parent)
-    os.makedirs(params_dict["outpath"], exist_ok = True)
+    os.makedirs(args.outdir, exist_ok = True)
 
     # main pipeline
-    adata = load_data_scanpy(expression_data = params_dict["rna_data_path"])
-    required_genes = verify_model_compatibility(model = params_dict["model"],
-                                                rna_data = adata)
+    adata = load_data_scanpy(expression_data = args.data)
+    required_genes = verify_model_compatibility(rna_data = adata)
     msi_input = prepare_msisensor_input(rna_data = adata,
-                                        required_genes = required_genes,
-                                        outpath = params_dict["outpath"])
-    run_msi_sensor(input = msi_input,
-                   outpath = params_dict["outpath"],
-                   model = params_dict["model"])
+                                        required_genes = required_genes)
+    run_msi_sensor(input = msi_input)
